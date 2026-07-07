@@ -35,14 +35,14 @@ Return ONLY valid JSON in this format:
 }`
 
 type PlannerAgent struct {
-	claude *llm.ClaudeClient
+	claude llm.Client
 }
 
-func NewPlannerAgent(claude *llm.ClaudeClient) *PlannerAgent {
+func NewPlannerAgent(claude llm.Client) *PlannerAgent {
 	return &PlannerAgent{claude: claude}
 }
 
-func (a *PlannerAgent) Name() string        { return "PlannerAgent" }
+func (a *PlannerAgent) Name() string         { return "PlannerAgent" }
 func (a *PlannerAgent) Type() core.AgentType { return core.AgentTypePlanner }
 
 func (a *PlannerAgent) CreatePlan(ctx context.Context, goal string) (*core.Plan, error) {

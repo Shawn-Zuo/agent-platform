@@ -20,7 +20,7 @@ type Engine struct {
 	store    *memory.Store
 }
 
-func NewEngine(claude *llm.ClaudeClient, store *memory.Store) *Engine {
+func NewEngine(claude llm.Client, store *memory.Store) *Engine {
 	registry := tools.NewRegistry()
 	registry.Register(&tools.CalculatorTool{})
 	registry.Register(tools.NewMockSearchTool())

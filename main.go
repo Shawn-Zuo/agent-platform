@@ -5,23 +5,34 @@ import (
 	"fmt"
 	"os"
 
+	"agent-platform/config"
 	"agent-platform/llm"
 	"agent-platform/memory"
 	"agent-platform/workflow"
 )
 
 func main() {
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		fmt.Fprintln(os.Stderr, "Error: ANTHROPIC_API_KEY environment variable is not set")
+	if err := config.Load(".env"); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load .env: %v\n", err)
+	}
+
+	var client llm.Client
+	switch {
+	case os.Getenv("ANTHROPIC_API_KEY") != "":
+		client = llm.NewClaudeClient()
+		fmt.Println("Using Claude (Anthropic)")
+	case os.Getenv("DEEPSEEK_API_KEY") != "":
+		client = llm.NewDeepSeekClient()
+		fmt.Println("Using DeepSeek")
+	default:
+		fmt.Fprintln(os.Stderr, "Error: set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY")
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
-	claude := llm.NewClaudeClient()
 	store := memory.NewStore()
-	engine := workflow.NewEngine(claude, store)
+	engine := workflow.NewEngine(client, store)
 
-	// Demo goals — each exercises different agent types
 	goals := []string{
 		"Calculate 123 multiplied by 456, then store the result in memory under key 'product'",
 		"Search the knowledge base to learn about RAG and agents, then summarize what you found",

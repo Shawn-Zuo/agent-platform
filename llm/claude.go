@@ -29,73 +29,106 @@ func NewClaudeClient() *ClaudeClient {
 	}
 }
 
-type ChatRequest struct {
-	SystemPrompt string
-	Messages     []anthropic.MessageParam
-	Tools        []anthropic.ToolUnionParam
-	MaxTokens    int64
-}
-
-type ChatResponse struct {
-	Content    string
-	ToolCalls  []ToolCallResult
-	StopReason string
-}
-
-type ToolCallResult struct {
-	ID    string
-	Name  string
-	Input map[string]any
-}
-
 func (c *ClaudeClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = 4096
 	}
-
 	params := anthropic.MessageNewParams{
 		Model:     c.model,
 		MaxTokens: maxTokens,
-		Messages:  req.Messages,
+		Messages:  toAnthropicMessages(req.Messages),
 	}
 	if req.SystemPrompt != "" {
 		params.System = []anthropic.TextBlockParam{{Text: req.SystemPrompt}}
 	}
 	if len(req.Tools) > 0 {
-		params.Tools = req.Tools
+		params.Tools = toAnthropicTools(req.Tools)
 	}
-
 	msg, err := c.client.Messages.New(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("claude API error: %w", err)
 	}
-	return buildResponse(msg), nil
+	return parseAnthropicResponse(msg), nil
 }
 
-// ChatAgentLoop sends a message with optional tools, returning both the parsed response and raw message
-// (so callers can append it to history via msg.ToParam()).
-func (c *ClaudeClient) ChatAgentLoop(ctx context.Context, systemPrompt string, history []anthropic.MessageParam, tools []anthropic.ToolUnionParam) (*ChatResponse, *anthropic.Message, error) {
+func (c *ClaudeClient) ChatAgentLoop(ctx context.Context, systemPrompt string, history []Message, tools []ToolParam) (*ChatResponse, []Message, error) {
 	params := anthropic.MessageNewParams{
 		Model:     c.model,
 		MaxTokens: 4096,
-		Messages:  history,
+		Messages:  toAnthropicMessages(history),
 	}
 	if systemPrompt != "" {
 		params.System = []anthropic.TextBlockParam{{Text: systemPrompt}}
 	}
 	if len(tools) > 0 {
-		params.Tools = tools
+		params.Tools = toAnthropicTools(tools)
 	}
-
 	msg, err := c.client.Messages.New(ctx, params)
 	if err != nil {
-		return nil, nil, err
+		return nil, history, fmt.Errorf("claude API error: %w", err)
 	}
-	return buildResponse(msg), msg, nil
+	resp := parseAnthropicResponse(msg)
+	updated := append(history, Message{
+		Role:      "assistant",
+		Text:      resp.Content,
+		ToolCalls: resp.ToolCalls,
+	})
+	return resp, updated, nil
 }
 
-func buildResponse(msg *anthropic.Message) *ChatResponse {
+// toAnthropicMessages converts abstract Messages to Anthropic MessageParams.
+func toAnthropicMessages(msgs []Message) []anthropic.MessageParam {
+	out := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			if len(m.ToolResults) > 0 {
+				blocks := make([]anthropic.ContentBlockParamUnion, len(m.ToolResults))
+				for i, tr := range m.ToolResults {
+					blocks[i] = anthropic.NewToolResultBlock(tr.ToolCallID, tr.Content, false)
+				}
+				out = append(out, anthropic.MessageParam{Role: "user", Content: blocks})
+			} else {
+				out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Text)))
+			}
+		case "assistant":
+			var blocks []anthropic.ContentBlockParamUnion
+			if m.Text != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(m.Text))
+			}
+			for _, tc := range m.ToolCalls {
+				inputJSON, _ := json.Marshal(tc.Input)
+				blocks = append(blocks, anthropic.ContentBlockParamUnion{
+					OfToolUse: &anthropic.ToolUseBlockParam{
+						ID:    tc.ID,
+						Name:  tc.Name,
+						Input: json.RawMessage(inputJSON),
+					},
+				})
+			}
+			out = append(out, anthropic.MessageParam{Role: "assistant", Content: blocks})
+		}
+	}
+	return out
+}
+
+func toAnthropicTools(tools []ToolParam) []anthropic.ToolUnionParam {
+	out := make([]anthropic.ToolUnionParam, len(tools))
+	for i, t := range tools {
+		tool := anthropic.ToolParam{
+			Name:        t.Name,
+			Description: anthropic.String(t.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: t.InputSchema["properties"],
+			},
+		}
+		out[i] = anthropic.ToolUnionParam{OfTool: &tool}
+	}
+	return out
+}
+
+func parseAnthropicResponse(msg *anthropic.Message) *ChatResponse {
 	resp := &ChatResponse{StopReason: string(msg.StopReason)}
 	for _, block := range msg.Content {
 		switch block.Type {
@@ -112,16 +145,4 @@ func buildResponse(msg *anthropic.Message) *ChatResponse {
 		}
 	}
 	return resp
-}
-
-// BuildToolParam constructs a ToolUnionParam from name, description, and JSON Schema properties.
-func BuildToolParam(name, description string, schema map[string]any) anthropic.ToolUnionParam {
-	tool := anthropic.ToolParam{
-		Name:        name,
-		Description: anthropic.String(description),
-		InputSchema: anthropic.ToolInputSchemaParam{
-			Properties: schema["properties"],
-		},
-	}
-	return anthropic.ToolUnionParam{OfTool: &tool}
 }

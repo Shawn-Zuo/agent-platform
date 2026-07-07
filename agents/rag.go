@@ -7,32 +7,34 @@ import (
 	"agent-platform/core"
 	"agent-platform/llm"
 	"agent-platform/tools"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 const ragSystem = `You are a RAG Agent. You retrieve relevant information and synthesize a comprehensive answer.
 Use the search_knowledge_base tool to find information, then provide a well-reasoned response.`
 
 type RAGAgent struct {
-	claude   *llm.ClaudeClient
+	claude   llm.Client
 	registry *tools.Registry
 }
 
-func NewRAGAgent(claude *llm.ClaudeClient, registry *tools.Registry) *RAGAgent {
+func NewRAGAgent(claude llm.Client, registry *tools.Registry) *RAGAgent {
 	return &RAGAgent{claude: claude, registry: registry}
 }
 
-func (a *RAGAgent) Name() string        { return "RAGAgent" }
+func (a *RAGAgent) Name() string         { return "RAGAgent" }
 func (a *RAGAgent) Type() core.AgentType { return core.AgentTypeRAG }
 
 func (a *RAGAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step core.Step) (core.StepResult, error) {
 	fmt.Printf("[RAG] Running step %s: %s\n", step.ID, step.Description)
 
-	var toolParams []anthropic.ToolUnionParam
+	var toolParams []llm.ToolParam
 	for _, t := range a.registry.All() {
 		if t.Name() == "search_knowledge_base" {
-			toolParams = append(toolParams, llm.BuildToolParam(t.Name(), t.Description(), t.InputSchema()))
+			toolParams = append(toolParams, llm.ToolParam{
+				Name:        t.Name(),
+				Description: t.Description(),
+				InputSchema: t.InputSchema(),
+			})
 		}
 	}
 
@@ -44,7 +46,7 @@ func (a *RAGAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step co
 	history := llm.UserMessage(fmt.Sprintf("Research and answer: %s", query))
 
 	for i := 0; i < 5; i++ {
-		resp, msg, err := a.claude.ChatAgentLoop(ctx, ragSystem, history, toolParams)
+		resp, newHistory, err := a.claude.ChatAgentLoop(ctx, ragSystem, history, toolParams)
 		if err != nil {
 			return core.StepResult{StepID: step.ID, IsError: true, Output: err.Error()}, err
 		}
@@ -53,8 +55,7 @@ func (a *RAGAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step co
 			return core.StepResult{StepID: step.ID, Output: resp.Content}, nil
 		}
 
-		history = llm.AppendAssistant(history, msg)
-
+		history = newHistory
 		for _, tc := range resp.ToolCalls {
 			result, err := a.registry.Execute(ctx, tc.Name, tc.Input)
 			if err != nil {
