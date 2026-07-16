@@ -11,6 +11,16 @@ import (
 	"agent-platform/tools"
 )
 
+// Event is a workflow lifecycle event emitted for visualization/observability.
+type Event struct {
+	Kind   string           `json:"kind"` // "plan" | "step_start" | "step_done" | "workflow_done" | "error"
+	Goal   string           `json:"goal,omitempty"`
+	Plan   *core.Plan       `json:"plan,omitempty"`
+	Step   *core.Step       `json:"step,omitempty"`
+	Result *core.StepResult `json:"result,omitempty"`
+	Detail string           `json:"detail,omitempty"`
+}
+
 type Engine struct {
 	planner  *agents.PlannerAgent
 	executor *agents.ExecutorAgent
@@ -18,6 +28,27 @@ type Engine struct {
 	memAgent *agents.MemoryAgent
 	registry *tools.Registry
 	store    *memory.Store
+
+	// OnEvent, if set, is called synchronously for each lifecycle event.
+	OnEvent func(Event)
+}
+
+func (e *Engine) emit(ev Event) {
+	if e.OnEvent != nil {
+		e.OnEvent(ev)
+	}
+}
+
+// ToolInfo returns name/description for each registered tool (for the UI).
+func (e *Engine) ToolInfo() []map[string]string {
+	var out []map[string]string
+	for _, t := range e.registry.All() {
+		out = append(out, map[string]string{
+			"name":        t.Name(),
+			"description": t.Description(),
+		})
+	}
+	return out
 }
 
 func NewEngine(claude llm.Client, store *memory.Store) *Engine {
@@ -44,8 +75,10 @@ func (e *Engine) Run(ctx context.Context, goal string) (map[string]core.StepResu
 
 	plan, err := e.planner.CreatePlan(ctx, goal)
 	if err != nil {
+		e.emit(Event{Kind: "error", Goal: goal, Detail: err.Error()})
 		return nil, fmt.Errorf("planning failed: %w", err)
 	}
+	e.emit(Event{Kind: "plan", Goal: goal, Plan: plan})
 
 	wfCtx := &core.WorkflowContext{
 		Goal:    goal,
@@ -65,13 +98,18 @@ func (e *Engine) Run(ctx context.Context, goal string) (map[string]core.StepResu
 				continue
 			}
 
+			step := step
+			e.emit(Event{Kind: "step_start", Step: &step})
 			result, err := e.runStep(ctx, wfCtx, step)
 			if err != nil {
+				e.emit(Event{Kind: "error", Step: &step, Detail: err.Error()})
 				return wfCtx.Results, fmt.Errorf("step %s failed: %w", step.ID, err)
 			}
 			wfCtx.Results[step.ID] = result
 			completed[step.ID] = true
 			progress = true
+			r := result
+			e.emit(Event{Kind: "step_done", Step: &step, Result: &r})
 		}
 		if !progress {
 			return wfCtx.Results, fmt.Errorf("workflow deadlock: circular or unsatisfiable dependencies")
@@ -81,6 +119,7 @@ func (e *Engine) Run(ctx context.Context, goal string) (map[string]core.StepResu
 	fmt.Printf("\n========================================\n")
 	fmt.Printf("Workflow completed: %d steps executed\n", len(completed))
 	fmt.Printf("========================================\n")
+	e.emit(Event{Kind: "workflow_done", Goal: goal, Detail: fmt.Sprintf("%d steps executed", len(completed))})
 	return wfCtx.Results, nil
 }
 

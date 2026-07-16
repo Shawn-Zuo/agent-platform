@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 
 	"agent-platform/config"
 	"agent-platform/llm"
 	"agent-platform/memory"
+	"agent-platform/web"
 	"agent-platform/workflow"
 )
 
 func main() {
+	webAddr := flag.String("web", "", "run the web visualization server on this address (e.g. :8080)")
+	flag.Parse()
+
 	if err := config.Load(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load .env: %v\n", err)
 	}
@@ -29,8 +35,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
 	store := memory.NewStore()
+
+	if *webAddr != "" {
+		srv := web.NewServer(client, store)
+		fmt.Printf("Web visualization running at http://localhost%s\n", *webAddr)
+		if err := http.ListenAndServe(*webAddr, srv.Handler()); err != nil {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	ctx := context.Background()
 	engine := workflow.NewEngine(client, store)
 
 	goals := []string{
