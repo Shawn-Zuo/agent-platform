@@ -40,7 +40,7 @@
 
 ```
 agent-platform/
-├── main.go              # 入口：初始化并运行两个演示工作流
+├── main.go              # 入口：命令行演示 或 -web 启动可视化服务
 ├── go.mod
 │
 ├── core/
@@ -48,6 +48,7 @@ agent-platform/
 │
 ├── llm/
 │   ├── claude.go        # Claude API 客户端（Chat / ChatAgentLoop）
+│   ├── deepseek.go      # DeepSeek 客户端（OpenAI 兼容格式）
 │   └── helpers.go       # 消息构建工具函数
 │
 ├── agents/
@@ -65,8 +66,14 @@ agent-platform/
 ├── memory/
 │   └── memory.go        # 线程安全的 KV 内存存储（支持 Tag 检索）
 │
-└── workflow/
-    └── engine.go        # Workflow Engine：拓扑排序执行，依赖管理
+├── workflow/
+│   └── engine.go        # Workflow Engine：拓扑排序执行，依赖管理，事件钩子
+│
+├── web/
+│   ├── server.go        # Web 可视化服务：HTTP + SSE 实时事件流
+│   └── index.go         # 单页可视化前端（内嵌 HTML/CSS/JS，零外部依赖）
+│
+└── openspec/            # OpenSpec 规格驱动开发（specs / changes）
 ```
 
 ## 核心概念
@@ -103,7 +110,7 @@ agent-platform/
 ### 前置条件
 
 - Go 1.21+
-- Anthropic API Key
+- Anthropic API Key **或** DeepSeek API Key
 
 ### 安装与运行
 
@@ -112,11 +119,16 @@ agent-platform/
 git clone <repo-url>
 cd agent-platform
 
-# 设置 API Key
+# 设置 API Key（二选一，优先使用 ANTHROPIC_API_KEY）
 export ANTHROPIC_API_KEY=sk-ant-...
+# 或
+export DEEPSEEK_API_KEY=sk-...
 
-# 运行演示
-go run main.go
+# 命令行模式：运行内置演示
+go run .
+
+# Web 可视化模式：启动服务后浏览器访问 http://localhost:8080
+go run . -web :8080
 ```
 
 ### 演示效果
@@ -130,6 +142,50 @@ go run main.go
 2. **RAG 检索**：`Search the knowledge base to learn about RAG and agents, then summarize what you found`
    - Planner 生成计划：`search_knowledge_base`（由 RAGAgent 执行）
    - RAGAgent 多轮检索后生成综合摘要
+
+## Web 可视化
+
+通过 `-web` 参数启动一个内置的可视化服务，在浏览器中实时观察工作流的执行过程：
+
+```bash
+go run . -web :8080   # 访问 http://localhost:8080
+```
+
+功能：
+
+- **输入目标**：手动输入 Goal，或点击预设示例
+- **DAG 步骤图**：实时渲染 Planner 生成的执行计划，每个步骤展示 ID、Agent 类型（彩色标签）、工具名、输入参数与依赖关系
+- **实时状态**：步骤状态随执行流式更新——等待 → 运行中（脉冲）→ 完成 / 错误，并展开显示每步输出
+- **侧边栏**：已注册工具列表 + Memory Store 实时内容
+
+技术实现：Go `net/http` 提供 HTTP 服务，通过 **Server-Sent Events (SSE)** 将 `workflow.Engine` 的生命周期事件（`plan` / `step_start` / `step_done` / `workflow_done` / `error`）推送到前端，前端为单页应用，无任何外部依赖。
+
+> 引擎侧通过 `Engine.OnEvent` 事件钩子暴露执行事件，命令行模式不受影响。
+
+## OpenSpec（规格驱动开发）
+
+项目集成了 [OpenSpec](https://github.com/Fission-AI/OpenSpec) v1.5.0，用于以「规格驱动」的方式管理开发：先写提案与规格，再落地实现。
+
+```
+openspec/
+├── config.yaml          # schema、项目 context、artifact 规则
+├── specs/               # 主规格库（已定型的能力规格）
+└── changes/             # 变更提案（含 archive/ 归档目录）
+```
+
+每个变更（change）包含若干工件（artifact）：`proposal.md`（做什么/为什么）、`design.md`（怎么做）、`tasks.md`（实现步骤）、以及增量规格（delta specs）。
+
+在 Claude Code 中通过斜杠命令驱动完整流程：
+
+| 命令 | 作用 |
+|------|------|
+| `/opsx:explore <想法>` | 思考模式，讨论与澄清需求（只思考不写代码） |
+| `/opsx:propose <名称/描述>` | 创建变更，一步生成 proposal / design / tasks |
+| `/opsx:apply [名称]` | 按 tasks.md 逐条实现 |
+| `/opsx:sync [名称]` | 将增量规格智能合并进主规格 |
+| `/opsx:archive [名称]` | 归档完成的变更并更新主规格 |
+
+也可直接使用 CLI：`openspec list`、`openspec view`、`openspec new change "<name>"`、`openspec status --change "<name>"`、`openspec validate`、`openspec archive <name>`。
 
 ## 扩展指南
 
@@ -164,11 +220,16 @@ func (a *MyAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step cor
 ## 技术栈
 
 - **语言**：Go 1.21
-- **LLM**：[Anthropic Claude](https://www.anthropic.com)（默认模型：`claude-opus-4-8`）
-- **SDK**：[anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) v1.0.0
+- **LLM**：[Anthropic Claude](https://www.anthropic.com)（默认模型：`claude-opus-4-8`）与 [DeepSeek](https://www.deepseek.com)（OpenAI 兼容）
+- **SDK**：[anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) v1.0.0、[go-openai](https://github.com/sashabaranov/go-openai) v1.41.2
+- **可视化**：Go `net/http` + Server-Sent Events（SSE），零外部前端依赖
+- **规格管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec) v1.5.0
 
 ## 环境变量
 
 | 变量名 | 说明 | 必填 |
 |--------|------|------|
-| `ANTHROPIC_API_KEY` | Anthropic API 密钥 | 是 |
+| `ANTHROPIC_API_KEY` | Anthropic API 密钥 | 二选一 |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥（当未设置 `ANTHROPIC_API_KEY` 时使用） | 二选一 |
+
+> 两者都设置时优先使用 `ANTHROPIC_API_KEY`。

@@ -16,8 +16,19 @@ Each step must have:
 - description: what this step accomplishes
 - agent_type: one of "executor", "rag", "memory"
 - tool_name: the tool to use (calculator, search_knowledge_base, memory_read, memory_write)
-- tool_input: JSON object with the tool's required inputs
+- tool_input: JSON object with the tool's required inputs (see schemas below — provide ALL required fields)
 - depends_on: list of step IDs this step depends on (empty for first steps)
+
+Tool input schemas (tool_input MUST include every required field with the correct type):
+- calculator: {"operation": "add"|"subtract"|"multiply"|"divide", "a": <number>, "b": <number>}
+    Both "a" and "b" are required numbers. Use literal numbers from the goal (e.g. "a": 123, "b": 456).
+- search_knowledge_base: {"query": <string>}
+- memory_read: {"key": <string>}
+- memory_write: {"key": <string>, "value": <string>}
+
+Referencing a previous step's output:
+- To use the output of an earlier step as a string input, set the value to "$<step_id>" (e.g. "value": "$step_1").
+- Only reference a step listed in this step's depends_on. Never leave a required field null or missing.
 
 Return ONLY valid JSON in this format:
 {
