@@ -52,14 +52,14 @@ func (e *Engine) ToolInfo() []map[string]string {
 }
 
 func NewEngine(claude llm.Client, store *memory.Store) *Engine {
-	registry := tools.NewRegistry()
-	registry.Register(&tools.CalculatorTool{})
-	registry.Register(tools.NewMockSearchTool())
-	registry.Register(tools.NewMemoryReadTool(store))
-	registry.Register(tools.NewMemoryWriteTool(store))
+	return NewEngineWithRegistry(claude, store, tools.NewDefaultRegistry(store))
+}
 
+// NewEngineWithRegistry builds an engine with local tools plus any dynamically
+// discovered tools already registered by an MCP client.
+func NewEngineWithRegistry(claude llm.Client, store *memory.Store, registry *tools.Registry) *Engine {
 	return &Engine{
-		planner:  agents.NewPlannerAgent(claude),
+		planner:  agents.NewPlannerAgent(claude, registry),
 		executor: agents.NewExecutorAgent(registry),
 		rag:      agents.NewRAGAgent(claude, registry),
 		memAgent: agents.NewMemoryAgent(store, registry),

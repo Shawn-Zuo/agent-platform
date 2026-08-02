@@ -8,6 +8,7 @@ import (
 
 	"agent-platform/llm"
 	"agent-platform/memory"
+	"agent-platform/tools"
 	"agent-platform/workflow"
 )
 
@@ -15,10 +16,15 @@ import (
 type Server struct {
 	client llm.Client
 	store  *memory.Store
+	tools  *tools.Registry
 }
 
 func NewServer(client llm.Client, store *memory.Store) *Server {
-	return &Server{client: client, store: store}
+	return NewServerWithRegistry(client, store, tools.NewDefaultRegistry(store))
+}
+
+func NewServerWithRegistry(client llm.Client, store *memory.Store, registry *tools.Registry) *Server {
+	return &Server{client: client, store: store, tools: registry}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -41,7 +47,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	// Build a throwaway engine just to enumerate registered tools.
-	eng := workflow.NewEngine(s.client, s.store)
+	eng := workflow.NewEngineWithRegistry(s.client, s.store, s.tools)
 	writeJSON(w, eng.ToolInfo())
 }
 
@@ -65,7 +71,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	eng := workflow.NewEngine(s.client, s.store)
+	eng := workflow.NewEngineWithRegistry(s.client, s.store, s.tools)
 
 	var mu sync.Mutex
 	send := func(ev workflow.Event) {

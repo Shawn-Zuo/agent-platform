@@ -7,6 +7,7 @@ import (
 
 	"agent-platform/core"
 	"agent-platform/llm"
+	"agent-platform/tools"
 )
 
 const plannerSystem = `You are a Planner Agent. Given a user goal, decompose it into a structured plan with ordered steps.
@@ -15,16 +16,14 @@ Each step must have:
 - id: unique step identifier (e.g. "step_1")
 - description: what this step accomplishes
 - agent_type: one of "executor", "rag", "memory"
-- tool_name: the tool to use (calculator, search_knowledge_base, memory_read, memory_write)
-- tool_input: JSON object with the tool's required inputs (see schemas below — provide ALL required fields)
+- tool_name: the exact name of one available tool
+- tool_input: JSON object matching that tool's input_schema; provide ALL required fields
 - depends_on: list of step IDs this step depends on (empty for first steps)
 
-Tool input schemas (tool_input MUST include every required field with the correct type):
-- calculator: {"operation": "add"|"subtract"|"multiply"|"divide", "a": <number>, "b": <number>}
-    Both "a" and "b" are required numbers. Use literal numbers from the goal (e.g. "a": 123, "b": 456).
-- search_knowledge_base: {"query": <string>}
-- memory_read: {"key": <string>}
-- memory_write: {"key": <string>, "value": <string>}
+Agent routing:
+- Use "memory" for memory_read and memory_write.
+- Use "rag" when a step needs an iterative retrieval loop.
+- Use "executor" for ordinary local tools and tools from MCP servers.
 
 Referencing a previous step's output:
 - To use the output of an earlier step as a string input, set the value to "$<step_id>" (e.g. "value": "$step_1").
@@ -46,11 +45,12 @@ Return ONLY valid JSON in this format:
 }`
 
 type PlannerAgent struct {
-	claude llm.Client
+	claude   llm.Client
+	registry *tools.Registry
 }
 
-func NewPlannerAgent(claude llm.Client) *PlannerAgent {
-	return &PlannerAgent{claude: claude}
+func NewPlannerAgent(claude llm.Client, registry *tools.Registry) *PlannerAgent {
+	return &PlannerAgent{claude: claude, registry: registry}
 }
 
 func (a *PlannerAgent) Name() string         { return "PlannerAgent" }
@@ -59,7 +59,11 @@ func (a *PlannerAgent) Type() core.AgentType { return core.AgentTypePlanner }
 func (a *PlannerAgent) CreatePlan(ctx context.Context, goal string) (*core.Plan, error) {
 	fmt.Printf("\n[Planner] Creating plan for goal: %s\n", goal)
 
-	messages := llm.UserMessage(fmt.Sprintf("Goal: %s\n\nAvailable tools: calculator, search_knowledge_base, memory_read, memory_write\n\nCreate a step-by-step plan.", goal))
+	catalog, err := a.toolCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("build tool catalog: %w", err)
+	}
+	messages := llm.UserMessage(fmt.Sprintf("Goal: %s\n\nAvailable tools:\n%s\n\nCreate a step-by-step plan using only these exact tool names.", goal, catalog))
 
 	resp, err := a.claude.Chat(ctx, llm.ChatRequest{
 		SystemPrompt: plannerSystem,
@@ -109,6 +113,24 @@ func (a *PlannerAgent) CreatePlan(ctx context.Context, goal string) (*core.Plan,
 
 	fmt.Printf("[Planner] Plan created with %d steps\n", len(plan.Steps))
 	return plan, nil
+}
+
+func (a *PlannerAgent) toolCatalog() (string, error) {
+	type toolInfo struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		InputSchema map[string]any `json:"input_schema"`
+	}
+	catalog := make([]toolInfo, 0, len(a.registry.All()))
+	for _, tool := range a.registry.All() {
+		catalog = append(catalog, toolInfo{
+			Name:        tool.Name(),
+			Description: tool.Description(),
+			InputSchema: tool.InputSchema(),
+		})
+	}
+	b, err := json.MarshalIndent(catalog, "", "  ")
+	return string(b), err
 }
 
 func (a *PlannerAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step core.Step) (core.StepResult, error) {

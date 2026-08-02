@@ -1,6 +1,6 @@
 # agent-platform
 
-面向复杂任务场景设计的 Agent 开发平台，基于 Go 构建 Workflow 编排引擎，支持 Planner、Executor、Memory、RAG 等多类 Agent 协作；统一接入 Claude 大模型及知识库能力，实现任务自动规划、工具调用与结果生成闭环。
+面向复杂任务场景设计的 Agent 开发平台，基于 Go 构建 Workflow 编排引擎，支持 Planner、Executor、Memory、RAG 等多类 Agent 协作；统一接入 Claude/DeepSeek、大模型工具调用及知识库能力，实现任务自动规划、工具调用与结果生成闭环。项目同时提供 MCP Server 和 MCP Client：既能把内置工具暴露给外部 AI 应用，也能发现并调用其他 MCP Server 提供的工具。
 
 ## 架构概览
 
@@ -34,6 +34,17 @@
 │  calculator │ search_knowledge_base  │
 │  memory_read │ memory_write          │
 └─────────────────────────────────────┘
+         ▲                    │
+         │                    ▼
+┌─────────────────┐  ┌─────────────────────┐
+│ MCP Client      │  │ MCP Server (stdio)  │
+│ remote discovery│  │ tools/list/call     │
+└─────────────────┘  └─────────────────────┘
+         ▲
+         │ stdio
+┌─────────────────────────────────────┐
+│       External MCP Servers           │
+└─────────────────────────────────────┘
 ```
 
 ## 目录结构
@@ -54,7 +65,7 @@ agent-platform/
 ├── agents/
 │   ├── planner.go       # PlannerAgent：调用 LLM 将目标分解为 JSON 计划
 │   ├── executor.go      # ExecutorAgent：按步骤调用工具注册表
-│   ├── memory_agent.go  # MemoryAgent：读写持久化内存
+│   ├── memory_agent.go  # MemoryAgent：读写进程内共享内存
 │   └── rag.go           # RAGAgent：检索增强生成，多轮工具调用循环
 │
 ├── tools/
@@ -65,6 +76,14 @@ agent-platform/
 │
 ├── memory/
 │   └── memory.go        # 线程安全的 KV 内存存储（支持 Tag 检索）
+├── mcpserver/
+│   ├── server.go        # MCP Server：将 Tool Registry 暴露为 MCP Tools
+│   └── server_test.go   # MCP 工具发现、调用与共享内存测试
+├── mcpclient/
+│   ├── config.go        # 外部 MCP Server 配置与校验
+│   ├── client.go        # stdio 连接、工具发现与会话生命周期
+│   ├── tool.go          # 将远程 MCP Tool 适配为 core.Tool
+│   └── *_test.go        # 配置、子进程连接、调用与命名测试
 │
 ├── workflow/
 │   └── engine.go        # Workflow Engine：拓扑排序执行，依赖管理，事件钩子
@@ -93,7 +112,7 @@ agent-platform/
 
 1. 调用 `PlannerAgent` 将目标分解为带依赖关系的步骤列表
 2. 使用拓扑排序逐步执行，确保依赖步骤先完成
-3. 所有步骤共享 `WorkflowContext`（包含历史结果和内存快照）
+3. 所有步骤共享本次运行的 `WorkflowContext`（包含步骤结果和工作流内存）
 4. 检测循环依赖，遇到死锁时返回错误
 
 ### 工具（Tools）
@@ -103,14 +122,16 @@ agent-platform/
 | `calculator` | 四则运算（add / subtract / multiply / divide） |
 | `search_knowledge_base` | 模拟知识库检索，内置 go、agent、rag、mcp、llm 等词条 |
 | `memory_read` | 按 key 读取内存，key 为空时返回全部内存摘要 |
-| `memory_write` | 将 key-value 写入持久化内存 |
+| `memory_write` | 将 key-value 写入进程内共享内存 |
+
+> 当前 Memory Store 是进程内、线程安全的 KV 存储，可以在同一进程的多个工作流或 MCP 调用之间共享，但进程重启后数据会丢失，并非磁盘持久化。
 
 ## 快速开始
 
 ### 前置条件
 
-- Go 1.21+
-- Anthropic API Key **或** DeepSeek API Key
+- Go 1.24+
+- Workflow/网页模式需要 Anthropic API Key **或** DeepSeek API Key；MCP 模式不需要
 
 ### 安装与运行
 
@@ -131,13 +152,19 @@ go run .
 go run . -web :8080
 ```
 
+如果只启动 MCP Server，不需要配置任何 LLM API Key：
+
+```bash
+go run . -mcp
+```
+
 ### 演示效果
 
 程序内置两个演示目标：
 
 1. **计算并记忆**：`Calculate 123 multiplied by 456, then store the result in memory under key 'product'`
    - Planner 生成计划：`calculator` → `memory_write`
-   - ExecutorAgent 执行计算，MemoryAgent 持久化结果
+   - ExecutorAgent 执行计算，MemoryAgent 将结果保存到进程内共享 Store
 
 2. **RAG 检索**：`Search the knowledge base to learn about RAG and agents, then summarize what you found`
    - Planner 生成计划：`search_knowledge_base`（由 RAGAgent 执行）
@@ -161,6 +188,88 @@ go run . -web :8080   # 访问 http://localhost:8080
 技术实现：Go `net/http` 提供 HTTP 服务，通过 **Server-Sent Events (SSE)** 将 `workflow.Engine` 的生命周期事件（`plan` / `step_start` / `step_done` / `workflow_done` / `error`）推送到前端，前端为单页应用，无任何外部依赖。
 
 > 引擎侧通过 `Engine.OnEvent` 事件钩子暴露执行事件，命令行模式不受影响。
+
+## MCP Server
+
+[Model Context Protocol（MCP）](https://modelcontextprotocol.io/) 是 AI 应用连接外部工具和上下文的标准协议。本项目实现 MCP Server，通过 `stdio` 传输暴露 Tool Registry 中默认的四个工具；如果同时指定 `-mcp-config`，也会暴露发现到的远程工具：
+
+| MCP Tool | 输入 |
+|----------|------|
+| `calculator` | `operation`、`a`、`b` |
+| `search_knowledge_base` | `query` |
+| `memory_read` | `key`，传空字符串时列出全部内存 |
+| `memory_write` | `key`、`value` |
+
+MCP 客户端可以通过标准的 `tools/list` 发现工具，通过 `tools/call` 调用工具。MCP 适配层直接复用项目的 `core.Tool` 和 `tools.Registry`，因此工作流模式与 MCP 模式的工具行为保持一致。
+
+### 启动 MCP Server
+
+建议先编译一个固定路径的可执行文件：
+
+```bash
+go build -o bin/agent-platform .
+```
+
+然后在支持 MCP 的客户端中添加配置，将 `command` 替换为实际的绝对路径：
+
+```json
+{
+  "mcpServers": {
+    "agent-platform": {
+      "command": "/absolute/path/to/agent-platform/bin/agent-platform",
+      "args": ["-mcp"]
+    }
+  }
+}
+```
+
+`-mcp` 模式使用 stdin/stdout 传输 MCP JSON-RPC 消息，所以不要将普通日志写入 stdout；服务错误会写入 stderr。该模式不启动 Workflow/LLM，也不需要 `ANTHROPIC_API_KEY` 或 `DEEPSEEK_API_KEY`。
+
+### MCP Client：调用外部工具
+
+创建一个配置文件，例如 `mcp-servers.json`：
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "/absolute/path/to/external-mcp-server",
+      "args": ["--stdio"],
+      "env": {
+        "SERVICE_API_KEY": "replace-me"
+      }
+    }
+  }
+}
+```
+
+然后启动命令行或网页模式：
+
+```bash
+# CLI Workflow 使用本地工具和远程 MCP 工具
+go run . -mcp-config ./mcp-servers.json -goal "Use the demo MCP server to echo hello"
+
+# Web Workflow 使用本地工具和远程 MCP 工具
+go run . -web :8080 -mcp-config ./mcp-servers.json
+```
+
+启动时 MCP Client 会依次完成：
+
+1. 启动配置中的 stdio MCP Server 子进程并初始化连接。
+2. 通过 `tools/list` 获取全部远程工具及其 JSON Schema。
+3. 将工具注册为 `服务器名__工具名`，例如 `demo__echo`，避免覆盖本地工具。
+4. Planner 从 Registry 动态生成工具清单，Executor/RAG 通过统一接口调用远程工具。
+5. 主程序退出时关闭 MCP 会话和子进程。
+
+也可以同时使用 MCP Client 和 MCP Server，将外部工具经过本项目重新暴露：
+
+```bash
+go run . -mcp -mcp-config ./mcp-servers.json
+```
+
+连接或工具发现失败会阻止程序启动，避免在工具集合不完整的状态下执行任务。不要把包含真实密钥的 MCP 配置提交到版本库；`env` 中的值会覆盖子进程继承的同名环境变量。
+
+当前 MCP Client 支持 stdio Tool Discovery/Tool Call，暂未支持 Streamable HTTP、MCP Resources、Prompts，以及运行期间的工具列表热更新。
 
 ## OpenSpec（规格驱动开发）
 
@@ -219,9 +328,10 @@ func (a *MyAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step cor
 
 ## 技术栈
 
-- **语言**：Go 1.21
+- **语言**：Go 1.24+
 - **LLM**：[Anthropic Claude](https://www.anthropic.com)（默认模型：`claude-opus-4-8`）与 [DeepSeek](https://www.deepseek.com)（OpenAI 兼容）
 - **SDK**：[anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) v1.0.0、[go-openai](https://github.com/sashabaranov/go-openai) v1.41.2
+- **MCP**：[Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk)，stdio Server + Client
 - **可视化**：Go `net/http` + Server-Sent Events（SSE），零外部前端依赖
 - **规格管理**：[OpenSpec](https://github.com/Fission-AI/OpenSpec) v1.5.0
 

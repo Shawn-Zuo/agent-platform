@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"agent-platform/core"
+	"agent-platform/memory"
 )
 
 type Registry struct {
@@ -13,6 +15,18 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]core.Tool)}
+}
+
+// NewDefaultRegistry returns the tools shipped with agent-platform. Keeping
+// this wiring in one place ensures the workflow engine and MCP server expose
+// the same tool set.
+func NewDefaultRegistry(store *memory.Store) *Registry {
+	registry := NewRegistry()
+	registry.Register(&CalculatorTool{})
+	registry.Register(NewMockSearchTool())
+	registry.Register(NewMemoryReadTool(store))
+	registry.Register(NewMemoryWriteTool(store))
+	return registry
 }
 
 func (r *Registry) Register(t core.Tool) {
@@ -37,5 +51,6 @@ func (r *Registry) All() []core.Tool {
 	for _, t := range r.tools {
 		out = append(out, t)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
 }

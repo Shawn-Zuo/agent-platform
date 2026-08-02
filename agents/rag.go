@@ -9,8 +9,7 @@ import (
 	"agent-platform/tools"
 )
 
-const ragSystem = `You are a RAG Agent. You retrieve relevant information and synthesize a comprehensive answer.
-Use the search_knowledge_base tool to find information, then provide a well-reasoned response.`
+const ragSystem = `You are a RAG Agent. Use the provided retrieval tool when needed, then synthesize a well-reasoned response.`
 
 type RAGAgent struct {
 	claude   llm.Client
@@ -29,7 +28,7 @@ func (a *RAGAgent) Run(ctx context.Context, wfCtx *core.WorkflowContext, step co
 
 	var toolParams []llm.ToolParam
 	for _, t := range a.registry.All() {
-		if t.Name() == "search_knowledge_base" {
+		if t.Name() == step.ToolName {
 			toolParams = append(toolParams, llm.ToolParam{
 				Name:        t.Name(),
 				Description: t.Description(),
