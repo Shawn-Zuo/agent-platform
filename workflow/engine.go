@@ -78,6 +78,10 @@ func (e *Engine) Run(ctx context.Context, goal string) (map[string]core.StepResu
 		e.emit(Event{Kind: "error", Goal: goal, Detail: err.Error()})
 		return nil, fmt.Errorf("planning failed: %w", err)
 	}
+	if err := e.validatePlan(plan); err != nil {
+		e.emit(Event{Kind: "error", Goal: goal, Detail: err.Error()})
+		return nil, fmt.Errorf("invalid plan: %w", err)
+	}
 	e.emit(Event{Kind: "plan", Goal: goal, Plan: plan})
 
 	wfCtx := &core.WorkflowContext{
@@ -143,4 +147,79 @@ func depsReady(deps []string, completed map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// validatePlan rejects malformed LLM output before any tool is executed. This
+// keeps planning failures deterministic and prevents partially executed plans.
+func (e *Engine) validatePlan(plan *core.Plan) error {
+	if plan == nil || len(plan.Steps) == 0 {
+		return fmt.Errorf("plan must contain at least one step")
+	}
+
+	steps := make(map[string]core.Step, len(plan.Steps))
+	for _, step := range plan.Steps {
+		if step.ID == "" {
+			return fmt.Errorf("step ID must not be empty")
+		}
+		if _, exists := steps[step.ID]; exists {
+			return fmt.Errorf("duplicate step ID %q", step.ID)
+		}
+		switch step.AgentType {
+		case core.AgentTypeExecutor, core.AgentTypeRAG, core.AgentTypeMemory:
+		default:
+			return fmt.Errorf("step %q has unsupported agent type %q", step.ID, step.AgentType)
+		}
+		if _, exists := e.registry.Get(step.ToolName); !exists {
+			return fmt.Errorf("step %q references unknown tool %q", step.ID, step.ToolName)
+		}
+		steps[step.ID] = step
+	}
+
+	for _, step := range plan.Steps {
+		seenDeps := make(map[string]bool, len(step.DependsOn))
+		for _, dependency := range step.DependsOn {
+			if dependency == step.ID {
+				return fmt.Errorf("step %q depends on itself", step.ID)
+			}
+			if _, exists := steps[dependency]; !exists {
+				return fmt.Errorf("step %q references unknown dependency %q", step.ID, dependency)
+			}
+			if seenDeps[dependency] {
+				return fmt.Errorf("step %q repeats dependency %q", step.ID, dependency)
+			}
+			seenDeps[dependency] = true
+		}
+	}
+
+	// Kahn's algorithm proves the dependency graph is acyclic before execution.
+	indegree := make(map[string]int, len(plan.Steps))
+	dependents := make(map[string][]string, len(plan.Steps))
+	for _, step := range plan.Steps {
+		indegree[step.ID] = len(step.DependsOn)
+		for _, dependency := range step.DependsOn {
+			dependents[dependency] = append(dependents[dependency], step.ID)
+		}
+	}
+	queue := make([]string, 0, len(plan.Steps))
+	for id, degree := range indegree {
+		if degree == 0 {
+			queue = append(queue, id)
+		}
+	}
+	visited := 0
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		visited++
+		for _, dependent := range dependents[id] {
+			indegree[dependent]--
+			if indegree[dependent] == 0 {
+				queue = append(queue, dependent)
+			}
+		}
+	}
+	if visited != len(plan.Steps) {
+		return fmt.Errorf("step dependencies contain a cycle")
+	}
+	return nil
 }

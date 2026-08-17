@@ -44,7 +44,7 @@ func TestServerListsDefaultTools(t *testing.T) {
 		names = append(names, tool.Name)
 	}
 	sort.Strings(names)
-	want := []string{"calculator", "memory_read", "memory_write", "search_knowledge_base"}
+	want := []string{"calculator", "memory_delete", "memory_read", "memory_search", "memory_write", "search_knowledge_base"}
 	if len(names) != len(want) {
 		t.Fatalf("tool names = %v, want %v", names, want)
 	}

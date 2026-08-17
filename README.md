@@ -32,7 +32,7 @@
 ┌─────────────────────────────────────┐
 │           Tool Registry              │
 │  calculator │ search_knowledge_base  │
-│  memory_read │ memory_write          │
+│  memory_read/write/search/delete     │
 └─────────────────────────────────────┘
          ▲                    │
          │                    ▼
@@ -65,17 +65,17 @@ agent-platform/
 ├── agents/
 │   ├── planner.go       # PlannerAgent：调用 LLM 将目标分解为 JSON 计划
 │   ├── executor.go      # ExecutorAgent：按步骤调用工具注册表
-│   ├── memory_agent.go  # MemoryAgent：读写进程内共享内存
+│   ├── memory_agent.go  # MemoryAgent：读写短期上下文与共享记忆
 │   └── rag.go           # RAGAgent：检索增强生成，多轮工具调用循环
 │
 ├── tools/
 │   ├── registry.go      # Tool Registry：注册、查找、执行工具
 │   ├── calculator.go    # 四则运算工具
 │   ├── search.go        # 模拟知识库检索工具
-│   └── memory_tool.go   # 内存读写工具（memory_read / memory_write）
+│   └── memory_tool.go   # 记忆读写、检索、删除工具
 │
 ├── memory/
-│   └── memory.go        # 线程安全的 KV 内存存储（支持 Tag 检索）
+│   └── memory.go        # 命名空间、TTL、检索与可选 JSON 持久化
 ├── mcpserver/
 │   ├── server.go        # MCP Server：将 Tool Registry 暴露为 MCP Tools
 │   └── server_test.go   # MCP 工具发现、调用与共享内存测试
@@ -111,9 +111,9 @@ agent-platform/
 `workflow.Engine` 是核心编排组件：
 
 1. 调用 `PlannerAgent` 将目标分解为带依赖关系的步骤列表
-2. 使用拓扑排序逐步执行，确保依赖步骤先完成
-3. 所有步骤共享本次运行的 `WorkflowContext`（包含步骤结果和工作流内存）
-4. 检测循环依赖，遇到死锁时返回错误
+2. 执行前静态校验计划，拦截重复步骤、未知工具、非法 Agent、无效依赖与依赖环，避免部分执行
+3. 使用拓扑排序逐步执行，确保依赖步骤先完成
+4. 所有步骤共享本次运行的 `WorkflowContext`（包含步骤结果和工作流内存）
 
 ### 工具（Tools）
 
@@ -121,10 +121,12 @@ agent-platform/
 |--------|------|
 | `calculator` | 四则运算（add / subtract / multiply / divide） |
 | `search_knowledge_base` | 模拟知识库检索，内置 go、agent、rag、mcp、llm 等词条 |
-| `memory_read` | 按 key 读取内存，key 为空时返回全部内存摘要 |
-| `memory_write` | 将 key-value 写入进程内共享内存 |
+| `memory_read` | 在指定 namespace 中按 key 读取记忆，key 为空时返回摘要 |
+| `memory_write` | 写入带 namespace、Tags 和可选 TTL 的共享记忆 |
+| `memory_search` | 按关键词检索 key、value 与 Tags，结果按相关性和更新时间排序 |
+| `memory_delete` | 删除指定 namespace 中的一条记忆 |
 
-> 当前 Memory Store 是进程内、线程安全的 KV 存储，可以在同一进程的多个工作流或 MCP 调用之间共享，但进程重启后数据会丢失，并非磁盘持久化。
+Memory 分为两层：单次执行中的 `WorkflowContext.Memory` 保存短期步骤上下文；共享 `memory.Store` 使用 namespace 隔离用户/会话，支持 TTL、Tags 和关键词召回。默认仍为纯内存模式；传入 `-memory-file` 后，写入和删除会通过临时文件 + 原子替换同步到 JSON，进程重启后自动恢复未过期记忆。
 
 ## 快速开始
 
@@ -150,6 +152,9 @@ go run .
 
 # Web 可视化模式：启动服务后浏览器访问 http://localhost:8080
 go run . -web :8080
+
+# 启用跨进程持久化记忆（CLI / Web / MCP 模式通用）
+go run . -memory-file ./data/memory.json
 ```
 
 如果只启动 MCP Server，不需要配置任何 LLM API Key：
@@ -191,14 +196,16 @@ go run . -web :8080   # 访问 http://localhost:8080
 
 ## MCP Server
 
-[Model Context Protocol（MCP）](https://modelcontextprotocol.io/) 是 AI 应用连接外部工具和上下文的标准协议。本项目实现 MCP Server，通过 `stdio` 传输暴露 Tool Registry 中默认的四个工具；如果同时指定 `-mcp-config`，也会暴露发现到的远程工具：
+[Model Context Protocol（MCP）](https://modelcontextprotocol.io/) 是 AI 应用连接外部工具和上下文的标准协议。本项目实现 MCP Server，通过 `stdio` 传输暴露 Tool Registry 中默认的六个工具；如果同时指定 `-mcp-config`，也会暴露发现到的远程工具：
 
 | MCP Tool | 输入 |
 |----------|------|
 | `calculator` | `operation`、`a`、`b` |
 | `search_knowledge_base` | `query` |
-| `memory_read` | `key`，传空字符串时列出全部内存 |
-| `memory_write` | `key`、`value` |
+| `memory_read` | `key`、可选 `namespace`，key 为空时列出该 namespace |
+| `memory_write` | `key`、`value`、可选 `namespace` / `tags` / `ttl_seconds` |
+| `memory_search` | `query`、可选 `namespace` / `limit` |
+| `memory_delete` | `key`、可选 `namespace` |
 
 MCP 客户端可以通过标准的 `tools/list` 发现工具，通过 `tools/call` 调用工具。MCP 适配层直接复用项目的 `core.Tool` 和 `tools.Registry`，因此工作流模式与 MCP 模式的工具行为保持一致。
 
@@ -217,7 +224,7 @@ go build -o bin/agent-platform .
   "mcpServers": {
     "agent-platform": {
       "command": "/absolute/path/to/agent-platform/bin/agent-platform",
-      "args": ["-mcp"]
+      "args": ["-mcp", "-memory-file", "/absolute/path/to/memory.json"]
     }
   }
 }

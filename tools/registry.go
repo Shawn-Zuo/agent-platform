@@ -26,6 +26,8 @@ func NewDefaultRegistry(store *memory.Store) *Registry {
 	registry.Register(NewMockSearchTool())
 	registry.Register(NewMemoryReadTool(store))
 	registry.Register(NewMemoryWriteTool(store))
+	registry.Register(NewMemorySearchTool(store))
+	registry.Register(NewMemoryDeleteTool(store))
 	return registry
 }
 

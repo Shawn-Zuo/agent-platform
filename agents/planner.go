@@ -21,7 +21,7 @@ Each step must have:
 - depends_on: list of step IDs this step depends on (empty for first steps)
 
 Agent routing:
-- Use "memory" for memory_read and memory_write.
+- Use "memory" for memory_read, memory_write, memory_search, and memory_delete.
 - Use "rag" when a step needs an iterative retrieval loop.
 - Use "executor" for ordinary local tools and tools from MCP servers.
 

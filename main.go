@@ -22,6 +22,7 @@ func main() {
 	webAddr := flag.String("web", "", "run the web visualization server on this address (e.g. :8080)")
 	mcpStdio := flag.Bool("mcp", false, "run the MCP server over stdio")
 	mcpConfigPath := flag.String("mcp-config", "", "connect to external stdio MCP servers defined in this JSON file")
+	memoryFile := flag.String("memory-file", "", "persist shared agent memory to this JSON file")
 	goal := flag.String("goal", "", "run one CLI workflow goal instead of the built-in demos")
 	flag.Parse()
 	if *mcpStdio && *webAddr != "" {
@@ -38,6 +39,15 @@ func main() {
 	}
 
 	store := memory.NewStore()
+	if *memoryFile != "" {
+		persistentStore, err := memory.NewPersistentStore(*memoryFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Memory store error: %v\n", err)
+			os.Exit(1)
+		}
+		store = persistentStore
+		fmt.Fprintf(os.Stderr, "Persistent memory enabled: %s\n", *memoryFile)
+	}
 	registry := tools.NewDefaultRegistry(store)
 	if *mcpConfigPath != "" {
 		cfg, err := mcpclient.LoadConfig(*mcpConfigPath)

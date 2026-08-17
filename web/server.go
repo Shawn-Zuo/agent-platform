@@ -52,7 +52,7 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.store.All())
+	writeJSON(w, s.store.AllInNamespace(r.URL.Query().Get("namespace")))
 }
 
 // handleRun streams workflow events over Server-Sent Events (SSE).
